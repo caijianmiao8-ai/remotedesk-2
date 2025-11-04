@@ -8,6 +8,8 @@
 #include <memory>
 #include <optional>
 
+#include "host/IceConfig.h"
+
 class QJsonObject;
 
 namespace rtc {
@@ -24,16 +26,6 @@ class SignalingClient;
 class CaptureVideo;
 class CaptureAudio;
 class InputInjector;
-
-struct IceServerConfig {
-    QString urls;
-    QString username;
-    QString credential;
-};
-
-struct IceConfig {
-    QList<IceServerConfig> servers;
-};
 
 class WebRtcPeer : public QObject {
     Q_OBJECT

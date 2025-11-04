@@ -7,6 +7,8 @@
 #include <functional>
 #include <memory>
 
+#include "host/IceConfig.h"
+
 QT_BEGIN_NAMESPACE
 class QLabel;
 class QLineEdit;
@@ -23,7 +25,6 @@ namespace host {
 class AuthClient;
 class SignalingClient;
 class WebRtcPeer;
-struct IceConfig;
 
 struct DeviceCodeInfo {
     QString deviceCode;
