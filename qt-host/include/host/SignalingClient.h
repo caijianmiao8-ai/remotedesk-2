@@ -1,55 +1,57 @@
 #pragma once
-
-#include <QJsonObject>
 #include <QObject>
-#include <QString>
 #include <QUrl>
+#include <QWebSocket>
 #include <QTimer>
-#include <memory>
+#include <QJsonObject>
 
-QT_BEGIN_NAMESPACE
-class QWebSocket;
-QT_END_NAMESPACE
+struct RealtimeCredentials {
+    QUrl     endpoint;     // e.g. https://xxxx.supabase.co
+    QString  apiKey;       // anon key
+    QString  topic;        // "remote:<sessionId>"
+    QString  signedToken;  // optional
+};
 
-namespace host {
+struct SignalEnvelope {
+    QString     type;      // "offer" | "answer" | "ice"
+    QJsonObject data;      // sdp/candidate JSON
+};
 
 class SignalingClient : public QObject {
     Q_OBJECT
 public:
-    explicit SignalingClient(QObject *parent = nullptr);
-    ~SignalingClient() override;
-
-    void connectTo(const QString &endpoint, const QString &apiKey, const QString &topic, const QString &appToken);
-    void disconnectFromServer();
-
-    void sendSignal(const QJsonObject &payload);
+    explicit SignalingClient(QObject* parent = nullptr);
+    void setCredentials(const RealtimeCredentials& cred);
+    void setAppToken(const QString& appToken);
+    void connectToRealtime();
+    void disconnectFromRealtime();
+    void sendSignal(const SignalEnvelope& env);
 
 signals:
     void connected();
-    void disconnected();
     void joined();
-    void messageReceived(const QJsonObject &payload);
-    void errorOccurred(const QString &message);
-    void logMessage(const QString &line);
+    void signalReceived(const SignalEnvelope& env);
+    void errorOccurred(const QString& message);
+    void closed();
 
 private slots:
-    void handleConnected();
-    void handleDisconnected();
-    void handleTextMessage(const QString &message);
-    void handleError();
+    void onSocketConnected();
+    void onSocketTextMessage(const QString& msg);
+    void onSocketClosed();
+    void onSocketError(QAbstractSocket::SocketError e);
+    void onHeartbeat();
 
 private:
     void sendJoin();
-    void sendHeartbeat();
-    void sendEnvelope(const QJsonObject &payload);
+    void sendBroadcast(const QString& event, const QJsonObject& payload);
+    void sendRaw(const QJsonObject& obj);
+    QUrl buildRealtimeWsUrl(const QUrl& endpoint, const QString& apikey, const QString& token) const;
 
-    std::unique_ptr<QWebSocket> m_socket;
-    QString m_topic;
-    QString m_appToken;
-    int m_refCounter = 1;
-    QTimer *m_heartbeatTimer = nullptr;
-    bool m_joined = false;
+private:
+    QWebSocket   m_socket;
+    QTimer       m_heartbeat;
+    RealtimeCredentials m_cred;
+    QString      m_appToken;
+    quint64      m_refCounter = 1;
+    bool         m_joined = false;
 };
-
-}  // namespace host
-
