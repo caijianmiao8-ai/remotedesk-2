@@ -37,10 +37,32 @@ inline constexpr auto kSdp         = "sdp";
 inline constexpr auto kCandidate   = "candidate";
 
 // 其它
-inline constexpr auto kAllowControl= "allowControl";
-inline constexpr auto kMessage     = "message";
-inline constexpr auto kError       = "error";
-inline constexpr auto kDataChannel = "input";
+inline constexpr auto kAllowControl   = "allowControl";
+inline constexpr auto kMessage        = "message";
+inline constexpr auto kError          = "error";
+inline constexpr auto kDataChannel    = "input";
+inline constexpr auto kDataChannelName= "input";
+
+inline constexpr auto kCode6          = "code6";
+inline constexpr auto kRole           = "role";
+inline constexpr auto kHostRole       = "host";
+inline constexpr auto kSessionId      = "sessionId";
+inline constexpr auto kEndpoint       = "endpoint";
+inline constexpr auto kApiKey         = "apiKey";
+inline constexpr auto kSignedToken    = "signedToken";
+inline constexpr auto kExpiresAt      = "expiresAt";
+inline constexpr auto kIceServers     = "iceServers";
+
+inline constexpr auto kDeviceCode     = "device_code";
+inline constexpr auto kUserCode       = "user_code";
+inline constexpr auto kVerificationUri= "verification_uri";
+inline constexpr auto kInterval       = "interval";
+inline constexpr auto kExpiresIn      = "expires_in";
+inline constexpr auto kStatus         = "status";
+inline constexpr auto kApproved       = "approved";
+inline constexpr auto kAppToken       = "app_token";
+inline constexpr auto kUser           = "user";
+inline constexpr auto kUserId         = "id";
 } // namespace json
 
 } // namespace host::protocol

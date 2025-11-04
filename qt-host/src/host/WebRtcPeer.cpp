@@ -6,17 +6,34 @@
 #include "host/InputInjector.h"
 #include "host/SignalingClient.h"
 
+#include <QByteArray>
 #include <QJsonDocument>
 #include <QJsonObject>
-#include <QByteArray>
-#include <variant>
+#include <QLatin1String>
+#include <cstdint>
+#include <optional>
 #include <string>
+#include <variant>
 
 #ifdef HOST_ENABLE_RTC
 #include <rtc/rtc.hpp>
 #endif
 
 namespace host {
+
+#ifdef HOST_ENABLE_RTC
+namespace {
+QString descriptionTypeToString(rtc::Description::Type type) {
+    if (type == rtc::Description::Type::Offer) {
+        return QString::fromUtf8(protocol::json::kOffer);
+    }
+    if (type == rtc::Description::Type::Answer) {
+        return QString::fromUtf8(protocol::json::kAnswer);
+    }
+    return QStringLiteral("unknown");
+}
+}  // namespace
+#endif
 
 WebRtcPeer::WebRtcPeer(SignalingClient *signaling, QObject *parent)
     : QObject(parent), m_signaling(signaling), m_videoCapture(std::make_unique<CaptureVideo>(this)),
@@ -85,19 +102,27 @@ void WebRtcPeer::handleSignal(const QJsonObject &payload) {
         emit logLine(tr("Peer not ready"));
         return;
     }
-    const QString type = payload.value(protocol::json::kType).toString();
+    const QString type = payload.value(QLatin1String(protocol::json::kType)).toString();
     if (type == protocol::json::kOffer) {
-        const auto sdp = payload.value(protocol::json::kSdp).toObject();
-        rtc::Description description(sdp.value("sdp").toString().toStdString(), type.toStdString());
+        const auto sdp = payload.value(QLatin1String(protocol::json::kSdp)).toObject();
+        rtc::Description description(sdp.value(QStringLiteral("sdp")).toString().toStdString(), type.toStdString());
         m_peer->setRemoteDescription(description);
         auto answer = m_peer->createAnswer();
-        m_peer->setLocalDescription(answer);
+        rtc::LocalDescriptionInit init;
+        init.sdp = std::string(answer);
+        m_peer->setLocalDescription(answer.type(), init);
     } else if (type == protocol::json::kIce) {
-        const auto candidate = payload.value(protocol::json::kCandidate).toObject();
-        std::string cand = candidate.value("candidate").toString().toStdString();
-        std::string mid = candidate.value("sdpMid").toString().toStdString();
-        int mline = candidate.value("sdpMLineIndex").toInt();
-        m_peer->addRemoteCandidate(rtc::Candidate(cand, mid, mline));
+        const auto candidate = payload.value(QLatin1String(protocol::json::kCandidate)).toObject();
+        const std::string cand = candidate.value(QStringLiteral("candidate")).toString().toStdString();
+        const std::string mid = candidate.value(QStringLiteral("sdpMid")).toString().toStdString();
+        const int mline = candidate.value(QStringLiteral("sdpMLineIndex")).toInt(-1);
+        if (!cand.empty()) {
+            std::optional<std::uint16_t> index;
+            if (mline >= 0) {
+                index = static_cast<std::uint16_t>(mline);
+            }
+            m_peer->addRemoteCandidate(rtc::Candidate(cand, mid, index));
+        }
     }
 #else
     Q_UNUSED(payload);
@@ -108,13 +133,12 @@ void WebRtcPeer::createPeer() {
 #ifdef HOST_ENABLE_RTC
     rtc::Configuration config;
     for (const auto &server : m_iceConfig.servers) {
-        rtc::IceServer ice;
-        ice.urls.push_back(server.urls.toStdString());
+        rtc::IceServer ice(server.urls.toStdString());
         if (!server.username.isEmpty()) {
             ice.username = server.username.toStdString();
         }
         if (!server.credential.isEmpty()) {
-            ice.password = server.credential.toStdString();
+            ice.credential = server.credential.toStdString();
         }
         config.iceServers.push_back(ice);
     }
@@ -153,17 +177,17 @@ void WebRtcPeer::createPeer() {
     });
 
     m_peer->onLocalDescription([this](rtc::Description desc) {
-        sendLocalDescription(QString::fromStdString(desc.type()), QString::fromStdString(std::string(desc)));
+        sendLocalDescription(descriptionTypeToString(desc.type()), QString::fromStdString(std::string(desc)));
     });
 
     m_peer->onLocalCandidate([this](rtc::Candidate candidate) {
-        QJsonObject payload;
-        payload.insert(protocol::json::kType, protocol::json::kIce);
         QJsonObject candidateObj;
-        candidateObj.insert("candidate", QString::fromStdString(candidate.candidate()));
-        candidateObj.insert("sdpMid", QString::fromStdString(candidate.mid()));
-        candidateObj.insert("sdpMLineIndex", candidate.mlineindex());
-        payload.insert(protocol::json::kCandidate, candidateObj);
+        candidateObj.insert(QStringLiteral("candidate"), QString::fromStdString(candidate.candidate()));
+        candidateObj.insert(QStringLiteral("sdpMid"), QString::fromStdString(candidate.mid()));
+        const auto index = candidate.mLineIndex();
+        if (index.has_value()) {
+            candidateObj.insert(QStringLiteral("sdpMLineIndex"), static_cast<int>(index.value()));
+        }
         sendIceCandidate(candidateObj);
     });
 
@@ -206,11 +230,11 @@ void WebRtcPeer::destroyPeer() {
 void WebRtcPeer::sendLocalDescription(const QString &type, const QString &sdp) {
 #ifdef HOST_ENABLE_RTC
     QJsonObject payload;
-    payload.insert(protocol::json::kType, type);
+    payload.insert(QLatin1String(protocol::json::kType), type);
     QJsonObject sdpObj;
-    sdpObj.insert("type", type);
-    sdpObj.insert("sdp", sdp);
-    payload.insert(protocol::json::kSdp, sdpObj);
+    sdpObj.insert(QStringLiteral("type"), type);
+    sdpObj.insert(QStringLiteral("sdp"), sdp);
+    payload.insert(QLatin1String(protocol::json::kSdp), sdpObj);
     if (m_signaling) {
         m_signaling->sendSignal(payload);
     }
@@ -223,8 +247,8 @@ void WebRtcPeer::sendLocalDescription(const QString &type, const QString &sdp) {
 void WebRtcPeer::sendIceCandidate(const QJsonObject &candidate) {
 #ifdef HOST_ENABLE_RTC
     QJsonObject payload;
-    payload.insert(protocol::json::kType, protocol::json::kIce);
-    payload.insert(protocol::json::kCandidate, candidate);
+    payload.insert(QLatin1String(protocol::json::kType), QLatin1String(protocol::json::kIce));
+    payload.insert(QLatin1String(protocol::json::kCandidate), candidate);
     if (m_signaling) {
         m_signaling->sendSignal(payload);
     }

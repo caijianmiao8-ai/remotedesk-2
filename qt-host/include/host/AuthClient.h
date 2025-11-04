@@ -5,9 +5,6 @@
 #include <QUrl>
 #include <memory>
 
-namespace QNetworkAccessManager {
-}
-
 class QNetworkAccessManager;
 class QNetworkReply;
 

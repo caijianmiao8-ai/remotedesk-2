@@ -48,6 +48,7 @@ set(HEADERS
   include/host/App.h
   include/host/UiMainWindow.h
   include/host/AuthClient.h
+  include/host/IceConfig.h
   include/host/SignalingClient.h
   include/host/WebRtcPeer.h
   include/host/CaptureVideo.h

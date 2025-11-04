@@ -1,131 +1,190 @@
 #include "host/SignalingClient.h"
+
+#include "common/Protocol.h"
+
+#include <QAbstractSocket>
 #include <QJsonDocument>
-#include <QUrlQuery>
+#include <QLatin1String>
 #include <QNetworkRequest>
 
-SignalingClient::SignalingClient(QObject* parent) : QObject(parent) {
-    connect(&m_socket, &QWebSocket::connected, this, &SignalingClient::onSocketConnected);
-    connect(&m_socket, &QWebSocket::textMessageReceived, this, &SignalingClient::onSocketTextMessage);
-    connect(&m_socket, &QWebSocket::disconnected, this, &SignalingClient::onSocketClosed);
-#if QT_VERSION >= QT_VERSION_CHECK(6,5,0)
-    connect(&m_socket, &QWebSocket::errorOccurred, this, &SignalingClient::onSocketError);
+namespace host {
+
+namespace {
+QLatin1String toKey(const char *key) {
+    return QLatin1String(key);
+}
+}  // namespace
+
+SignalingClient::SignalingClient(QObject *parent) : QObject(parent) {
+    connect(&m_socket, &QWebSocket::connected, this, &SignalingClient::handleConnected);
+    connect(&m_socket, &QWebSocket::textMessageReceived, this, &SignalingClient::handleTextMessage);
+    connect(&m_socket, &QWebSocket::disconnected, this, &SignalingClient::handleClosed);
+#if QT_VERSION >= QT_VERSION_CHECK(6, 5, 0)
+    connect(&m_socket, &QWebSocket::errorOccurred, this, &SignalingClient::handleError);
 #else
-    connect(&m_socket, SIGNAL(error(QAbstractSocket::SocketError)), this, SLOT(onSocketError(QAbstractSocket::SocketError)));
+    connect(&m_socket,
+            QOverload<QAbstractSocket::SocketError>::of(&QWebSocket::error),
+            this,
+            &SignalingClient::handleError);
 #endif
+
     m_heartbeat.setInterval(30000);
-    connect(&m_heartbeat, &QTimer::timeout, this, &SignalingClient::onHeartbeat);
+    connect(&m_heartbeat, &QTimer::timeout, this, &SignalingClient::sendHeartbeat);
 }
 
-void SignalingClient::setCredentials(const RealtimeCredentials& cred) { m_cred = cred; }
-void SignalingClient::setAppToken(const QString& token) { m_appToken = token; }
+void SignalingClient::connectTo(const QString &url,
+                                const QString &apiKey,
+                                const QString &topic,
+                                const QString &appToken) {
+    if (m_socket.state() != QAbstractSocket::UnconnectedState) {
+        m_socket.close();
+    }
 
-QUrl SignalingClient::buildRealtimeWsUrl(const QUrl& endpoint, const QString& apikey, const QString& token) const {
-    QUrl ws = endpoint;
-    if (ws.scheme() == "https") ws.setScheme("wss");
-    else if (ws.scheme() == "http") ws.setScheme("ws");
-    ws.setPath("/realtime/v1/websocket");
-    QUrlQuery q;
-    q.addQueryItem("apikey", apikey);
-    q.addQueryItem("vsn", "1.0.0");
-    if (!token.isEmpty()) q.addQueryItem("token", token);
-    ws.setQuery(q);
-    return ws;
-}
+    m_url = QUrl(url);
+    m_apiKey = apiKey;
+    m_topic = topic;
+    m_appToken = appToken;
+    m_joined = false;
 
-void SignalingClient::connectToRealtime() {
-    if (!m_cred.endpoint.isValid() || m_cred.apiKey.isEmpty() || m_cred.topic.isEmpty()) {
-        emit errorOccurred("Invalid realtime credentials");
+    if (!m_url.isValid()) {
+        emit errorOccurred(tr("Invalid realtime URL: %1").arg(url));
         return;
     }
-    const QUrl url = buildRealtimeWsUrl(m_cred.endpoint, m_cred.apiKey, m_cred.signedToken);
-    QNetworkRequest req(url);
-    if (!m_appToken.isEmpty())
-        req.setRawHeader("Authorization", QByteArray("Bearer ").append(m_appToken.toUtf8()));
-    m_socket.open(req);
+
+    emit logMessage(tr("Connecting to realtime %1").arg(m_url.toString()));
+
+    QNetworkRequest request(m_url);
+    if (!m_apiKey.isEmpty()) {
+        request.setRawHeader("apikey", m_apiKey.toUtf8());
+    }
+    if (!m_appToken.isEmpty()) {
+        request.setRawHeader("Authorization", QByteArray("Bearer ").append(m_appToken.toUtf8()));
+    }
+
+    m_socket.open(request);
 }
 
-void SignalingClient::disconnectFromRealtime() {
+void SignalingClient::disconnect() {
     m_heartbeat.stop();
-    m_socket.close();
+    m_joined = false;
+    if (m_socket.state() != QAbstractSocket::UnconnectedState) {
+        m_socket.close();
+    }
 }
 
-void SignalingClient::onSocketConnected() {
+void SignalingClient::sendSignal(const QJsonObject &payload) {
+    if (m_topic.isEmpty()) {
+        emit logMessage(tr("Cannot send signal without a topic."));
+        return;
+    }
+    sendBroadcast(QLatin1String(protocol::json::kSignal), payload);
+}
+
+void SignalingClient::handleConnected() {
     emit connected();
+    emit logMessage(tr("Realtime socket connected"));
     m_joined = false;
     sendJoin();
     m_heartbeat.start();
 }
 
-void SignalingClient::sendJoin() {
-    const QJsonObject obj{
-        {"topic",   m_cred.topic},
-        {"event",   "phx_join"},
-        {"payload", QJsonObject{}},
-        {"ref",     QString::number(m_refCounter++)}
-    };
-    sendRaw(obj);
-}
+void SignalingClient::handleTextMessage(const QString &message) {
+    const auto document = QJsonDocument::fromJson(message.toUtf8());
+    if (!document.isObject()) {
+        emit logMessage(tr("Ignoring non-object realtime payload"));
+        return;
+    }
 
-void SignalingClient::onHeartbeat() {
-    const QJsonObject beat{
-        {"topic",   "phoenix"},
-        {"event",   "heartbeat"},
-        {"payload", QJsonObject{}},
-        {"ref",     QString::number(m_refCounter++)}
-    };
-    sendRaw(beat);
-}
+    const auto object = document.object();
+    const QString event = object.value(toKey(protocol::json::kEvent)).toString();
+    const QString topic = object.value(toKey(protocol::json::kTopic)).toString();
 
-void SignalingClient::sendBroadcast(const QString& event, const QJsonObject& payload) {
-    const QJsonObject obj{
-        {"topic",   m_cred.topic},
-        {"event",   "broadcast"},
-        {"payload", QJsonObject{
-            {"type",   "broadcast"},
-            {"event",  event},       // "signal"
-            {"payload", payload}
-        }},
-        {"ref",     QString::number(m_refCounter++)}
-    };
-    sendRaw(obj);
-}
-
-void SignalingClient::sendSignal(const SignalEnvelope& env) {
-    QJsonObject inner = env.data;
-    inner.insert("type", env.type);  // "offer"/"answer"/"ice"
-    sendBroadcast("signal", inner);
-}
-
-void SignalingClient::sendRaw(const QJsonObject& obj) {
-    m_socket.sendTextMessage(QString::fromUtf8(QJsonDocument(obj).toJson(QJsonDocument::Compact)));
-}
-
-void SignalingClient::onSocketTextMessage(const QString& msg) {
-    const auto obj = QJsonDocument::fromJson(msg.toUtf8()).object();
-    const auto event = obj.value("event").toString();
-
-    if (event == "phx_reply") {
-        const auto payload = obj.value("payload").toObject();
-        if (!m_joined && payload.value("status").toString() == "ok" &&
-            obj.value("topic").toString() == m_cred.topic) {
+    if (event == QLatin1String("phx_reply")) {
+        const auto payload = object.value(toKey(protocol::json::kPayload)).toObject();
+        const QString status = payload.value(QLatin1String("status")).toString();
+        if (!m_joined && status == QLatin1String("ok") && topic == m_topic) {
             m_joined = true;
+            emit logMessage(tr("Realtime channel joined"));
             emit joined();
         }
         return;
     }
 
-    if (event == "broadcast") {
-        const auto p = obj.value("payload").toObject();
-        if (p.value("type").toString() == "broadcast" &&
-            p.value("event").toString() == "signal") {
-            const auto inner = p.value("payload").toObject();
-            const auto t = inner.value("type").toString();
-            QJsonObject data = inner; data.remove("type");
-            emit signalReceived(SignalEnvelope{t, data});
+    if (event == QLatin1String(protocol::json::kBroadcast)) {
+        const auto payload = object.value(toKey(protocol::json::kPayload)).toObject();
+        const QString type = payload.value(toKey(protocol::json::kType)).toString();
+        if (type != QLatin1String(protocol::json::kBroadcast)) {
+            return;
         }
+        if (payload.value(QLatin1String("event")).toString() != QLatin1String(protocol::json::kSignal)) {
+            return;
+        }
+        const auto inner = payload.value(toKey(protocol::json::kPayload)).toObject();
+        emit messageReceived(inner);
         return;
     }
 }
 
-void SignalingClient::onSocketClosed() { m_heartbeat.stop(); emit closed(); }
-void SignalingClient::onSocketError(QAbstractSocket::SocketError) { emit errorOccurred(m_socket.errorString()); }
+void SignalingClient::handleClosed() {
+    m_heartbeat.stop();
+    m_joined = false;
+    emit logMessage(tr("Realtime socket closed"));
+    emit closed();
+}
+
+void SignalingClient::handleError(QAbstractSocket::SocketError) {
+    const QString errorText = m_socket.errorString();
+    emit logMessage(tr("Realtime socket error: %1").arg(errorText));
+    emit errorOccurred(errorText);
+}
+
+void SignalingClient::sendHeartbeat() {
+    QJsonObject payload;
+    payload.insert(toKey(protocol::json::kTopic), QStringLiteral("phoenix"));
+    payload.insert(toKey(protocol::json::kEvent), QLatin1String(protocol::json::kHeartbeat));
+    payload.insert(toKey(protocol::json::kPayload), QJsonObject{});
+    payload.insert(toKey(protocol::json::kRef), QString::number(m_refCounter++));
+    sendRaw(payload);
+}
+
+void SignalingClient::sendJoin() {
+    QJsonObject payload;
+    if (!m_appToken.isEmpty()) {
+        QJsonObject headers;
+        headers.insert(QStringLiteral("Authorization"), QStringLiteral("Bearer %1").arg(m_appToken));
+        QJsonObject config;
+        config.insert(QStringLiteral("headers"), headers);
+        payload.insert(QStringLiteral("config"), config);
+    }
+
+    QJsonObject message;
+    message.insert(toKey(protocol::json::kTopic), m_topic);
+    message.insert(toKey(protocol::json::kEvent), QLatin1String(protocol::json::kPhxJoin));
+    message.insert(toKey(protocol::json::kPayload), payload);
+    message.insert(toKey(protocol::json::kRef), QString::number(m_refCounter++));
+
+    sendRaw(message);
+}
+
+void SignalingClient::sendBroadcast(const QString &event, const QJsonObject &payload) {
+    QJsonObject outerPayload;
+    outerPayload.insert(toKey(protocol::json::kType), QLatin1String(protocol::json::kBroadcast));
+    outerPayload.insert(QStringLiteral("event"), event);
+    outerPayload.insert(toKey(protocol::json::kPayload), payload);
+
+    QJsonObject message;
+    message.insert(toKey(protocol::json::kTopic), m_topic);
+    message.insert(toKey(protocol::json::kEvent), QLatin1String(protocol::json::kBroadcast));
+    message.insert(toKey(protocol::json::kPayload), outerPayload);
+    message.insert(toKey(protocol::json::kRef), QString::number(m_refCounter++));
+
+    sendRaw(message);
+}
+
+void SignalingClient::sendRaw(const QJsonObject &object) {
+    const QByteArray data = QJsonDocument(object).toJson(QJsonDocument::Compact);
+    m_socket.sendTextMessage(QString::fromUtf8(data));
+}
+
+}  // namespace host
+
